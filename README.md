@@ -1,8 +1,8 @@
 # TabTransformer++ for Residual Learning
 
-This notebook implements **TabTransformer++**, an enhanced deep learning architecture for tabular data.
+This repository implements **TabTransformer++**, an enhanced deep learning architecture for tabular data.
 
-Instead of predicting the target variable directly, this model demonstrates a **Residual Learning (Model Stacking)** strategy: a simple linear model makes a baseline prediction, and the Transformer is trained to predict the **error (residual)** of that baseline. The final model combines both and significantly outperforms either model alone.
+Instead of predicting the target variable directly, this model demonstrates a **Residual Learning (Model Stacking)** strategy: a simple linear model produces a baseline prediction, and a Transformer is trained to predict the **error (residual)** of that baseline. The final prediction combines both components and significantly outperforms either model alone.
 
 Based on: **TabTransformer: Tabular Data Modeling Using Contextual Embeddings** (Huang et al., 2020)
 
@@ -10,73 +10,96 @@ Based on: **TabTransformer: Tabular Data Modeling Using Contextual Embeddings** 
 
 ## 🧠 Core Concept: Residual Stacking
 
-The model treats the regression problem as an **additive decomposition**:
-
-
+The regression task is modeled as an **additive decomposition**:
 
 \[
 \text{Final Prediction} = \text{Base Prediction} + \text{Predicted Residual}
 \]
 
-
-
-- **Base Model (Ridge):** A computationally cheap, interpretable model generates the initial prediction.
-- **Target Calculation:**
-
-
+### Workflow
+- **Base Model (Ridge):** A fast, interpretable linear model generates the initial prediction.
+- **Residual Target:**
 
 \[
 \text{Residual} = \text{True Target} - \text{Base Prediction}
 \]
 
+- **Correction Model:** TabTransformer++ learns to predict this residual.
+- **Inference:** The predicted residual is added back to the base prediction.
 
-
-- **Correction:** The TabTransformer++ learns to predict this specific error.
-- **Inference:** The Transformer's output is added to the Ridge prediction to correct it.
-
-This design mirrors how human analysts often work: start with a simple baseline, then layer in structured corrections.
+This mirrors how human analysts work: start with a simple baseline, then apply structured corrections.
 
 ---
 
 ## 🚀 Architectural Innovations
 
-Standard Transformers treat tabular data as simple discrete tokens (like words). **TabTransformer++** introduces six key innovations to handle **continuous numerical data** more effectively.
+Standard Transformers treat tabular features as discrete tokens. **TabTransformer++** introduces several enhancements to better model **continuous numerical data**.
 
 ### Innovation Summary
 
-| # | Innovation | Description |
-|---|------------|-------------|
-| 1 | Dual Representation | Features are processed as both discrete tokens (via Quantile Binning) and continuous scalars (via Z-Score normalization) to capture both non-linear patterns and precise magnitudes. |
-| 2 | Gated Fusion | A learnable sigmoid gate dynamically blends the discrete embedding with the continuous scalar projection: \(E = E_{\text{tok}} + \sigma(g) \cdot E_{\text{val}}\). |
-| 3 | Per-Token MLPs | Each feature has its own dedicated MLP to project scalar values, allowing the model to learn specific transformations (e.g., logarithmic vs. linear) for each column. |
-| 4 | TokenDrop | Feature-level dropout that randomly zeros entire feature embeddings during training (\(p = 0.12\)) to prevent over-reliance on any single column. |
-| 5 | CLS Token | A special learned `[CLS]` token is prepended to the input sequence. The final prediction is derived solely from this token’s embedding. |
-| 6 | Pre-LayerNorm | Layer normalization is applied *before* attention blocks (`norm_first=True`) for stable gradient flow. |
 
----
 
-## 🛠️ Workflow Diagram
+Innovation
 
-The full pipeline is **leak-free**, modular, and stacking-aware.
+Description
 
-```mermaid
+1
+
+Dual Representation
+
+Each feature is represented as both a discrete token (quantile binning) and a continuous scalar (z-score normalization).
+
+2
+
+Gated Fusion
+
+A learnable sigmoid gate blends token embeddings with scalar projections: (E = E_{\text{tok}} + \sigma(g) \cdot E_{\text{val}}).
+
+3
+
+Per-Token MLPs
+
+Each feature has its own MLP for scalar projection, enabling feature-specific transformations.
+
+4
+
+TokenDrop
+
+Feature-level dropout that zeros entire embeddings during training ((p = 0.12)).
+
+5
+
+CLS Token
+
+A learned [CLS] token aggregates global information for prediction.
+
+6
+
+Pre-LayerNorm
+
+Layer normalization is applied before attention blocks for improved training stability.
+
+🛠️ End-to-End Pipeline
+
+The pipeline is leak-free, modular, and stacking-aware.
+
 graph TD
-    subgraph "1. Data Prep (Leak-Free)"
-        A[Raw Data] -->|K-Fold| B[Train Base Model: Ridge]
-        B --> C[Calculate Residuals]
+    subgraph "1. Data Preparation"
+        A[Raw Data] -->|K-Fold CV| B[Train Base Model (Ridge)]
+        B --> C[Compute OOF Residuals]
     end
 
     subgraph "2. Tokenization"
-        C --> D{TabularTokenizer}
+        C --> D[TabularTokenizer]
         D -->|Quantile Binning| E[Discrete Tokens]
         D -->|Z-Score Scaling| F[Continuous Scalars]
     end
 
     subgraph "3. TabTransformer++"
-        E & F --> G[Gated Fusion Layer]
+        E & F --> G[Gated Fusion]
         G --> H[TokenDrop]
         H --> I[Transformer Encoder × 3]
-        I --> J[Predict Residual]
+        I --> J[Residual Prediction]
     end
 
     subgraph "4. Post-Processing"
@@ -84,64 +107,110 @@ graph TD
         K --> L[Add to Base Prediction]
     end
 
+⚙️ Repository Components
 
-## Config
-Central repository for hyperparameters, including:
-- Batch size
-- Learning rate
-- Number of bins
-- Hidden sizes
-- TokenDrop probability
-- Other training and model parameters
+Config
 
-## get_simulated_data()
-Simulates the stacking environment by:
-- Training **Ridge** and **RandomForest** models
-- Using **K-Fold Cross-Validation**
-- Generating leak-free **Out-Of-Fold (OOF) residuals**
+Centralized configuration for:
 
-## TabularTokenizer
+Batch size
+
+Learning rate
+
+Number of quantile bins
+
+Hidden dimensions
+
+TokenDrop probability
+
+Training and model hyperparameters
+
+get_simulated_data()
+
+Simulates a stacking environment by:
+
+Training Ridge and RandomForest models
+
+Using K-Fold Cross-Validation
+
+Producing leak-free Out-of-Fold (OOF) residuals
+
+TabularTokenizer
+
 Custom tokenizer that:
-- Applies **Quantile Binning** to create discrete tokens
-- Applies **Z-Score normalization** to create continuous scalars
-- Outputs **both representations** for each feature
 
-## TabTransformerGated (Main Model)
-PyTorch module implementing:
-- Dual representation inputs (tokens + scalars)
-- Gated Fusion layer
-- Per-token MLPs for scalar projections
-- `[CLS]` token handling
-- Transformer encoder stack with **Pre-LayerNorm**
+Applies quantile binning for discrete tokens
 
-## TokenDrop
-Custom module for feature-level dropout:
-- Randomly zeroes entire feature embeddings
-- Controls over-reliance on any single column
+Applies z-score normalization for continuous scalars
 
-## Training Loop
-Implements:
-- Standard supervised training on residual targets
-- **EMA (Exponential Moving Average)** over model weights for stability
-- **Isotonic Regression** for final value calibration
+Outputs both representations per feature
 
-## Final Inference
+TabTransformerGated
+
+Main PyTorch model implementing:
+
+Dual token + scalar inputs
+
+Gated fusion mechanism
+
+Per-feature scalar MLPs
+
+[CLS] token aggregation
+
+Transformer encoder stack with Pre-LayerNorm
+
+TokenDrop
+
+Feature-level dropout module that:
+
+Randomly removes entire feature embeddings
+
+Reduces reliance on any single column
+
+Training Loop
+
+Includes:
+
+Supervised training on residual targets
+
+EMA (Exponential Moving Average) of model weights
+
+Isotonic Regression for final calibration
+
+🔮 Final Inference
+
+[ y_{\text{pred}} = y_{\text{base}} + y_{\text{residual}} ]
+
+📊 Results & Performance
+
+Residual stacking yields a substantial error reduction compared to the base model alone.
+
+California Housing Simulation (Example)
+
+Model Strategy
+
+Train RMSE (CV)
+
+Test RMSE (Holdout)
+
+Improvement
+
+Base Model (Ridge)
+
+0.8094
+
+0.7361
+
+—
+
+✅ Key Takeaways
+
+Residual learning simplifies the learning task for deep models.
+
+TabTransformer++ effectively models continuous features without losing precision.
+
+Stacking linear and Transformer models combines interpretability with expressive power.
+
+Leak-free OOF residuals are critical for reliable performance gains.
 
 
-\[
-y_{\text{pred}} = y_{\text{base}} + y_{\text{residual}}
-\]
-
-
-
----
-
-# 📊 Results & Performance
-
-The stacking approach yields a significant reduction in error compared to the base model alone.
-
-## California Housing Simulation (Example)
-
-| Model Strategy                 | Train RMSE (CV) | Test RMSE (Holdout) | Improvement |
-|--------------------------------|-----------------|---------------------|-------------|
-| Base Model Only (Ridge)        | 0.8094          | 0.7361             
