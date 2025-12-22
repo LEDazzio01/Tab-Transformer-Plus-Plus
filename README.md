@@ -20,11 +20,11 @@ This project implements **TabTransformer++**, an enhanced transformer architectu
 ### The Residual Learning Approach
 
 ```
-+-------------------+     +------------------------+     +-----------------------+
-|    Base Model     |     |    TabTransformer++    |     |   Final Prediction    |
-| (Ridge, XGBoost)  | --> |   Predicts Residual    | --> |   Base + Residual     |
-|    -> base_pred   |     |        (error)         |     |                       |
-+-------------------+     +------------------------+     +-----------------------+
+┌─────────────────┐     ┌──────────────────────┐     ┌─────────────────────┐
+│   Base Model    │     │   TabTransformer++   │     │   Final Prediction  │
+│ (Ridge, XGBoost)│ ──► │  Predicts Residual   │ ──► │  Base + Residual    │
+│   → base_pred   │     │     (error)          │     │                     │
+└─────────────────┘     └──────────────────────┘     └─────────────────────┘
 ```
 
 **Why residual learning?**
@@ -44,8 +44,8 @@ Each feature is represented in two complementary ways:
 
 | Type | Creation | Captures |
 |------|----------|----------|
-| **Token Embedding** | Quantile bin -> learned vector | Discrete patterns, ordinal relationships |
-| **Value Embedding** | Raw scalar -> MLP projection | Precise numeric magnitude |
+| **Token Embedding** | Quantile bin → learned vector | Discrete patterns, ordinal relationships |
+| **Value Embedding** | Raw scalar → MLP projection | Precise numeric magnitude |
 
 *Why both?* Binning loses precision (1.01 and 1.99 may share a bin), but raw scalars lack pattern-matching power.
 
@@ -54,7 +54,7 @@ Each feature is represented in two complementary ways:
 Per-feature gates (initialized to 0) control the blend:
 
 ```python
-final_emb[i] = token_emb[i] + sigmoid(gate[i]) * value_emb[i]
+final_emb[i] = token_emb[i] + σ(gate[i]) × value_emb[i]
 ```
 
 - Gates are **learned independently** for each feature
@@ -65,7 +65,7 @@ final_emb[i] = token_emb[i] + sigmoid(gate[i]) * value_emb[i]
 Each feature gets its own projection network instead of sharing:
 
 ```
-Linear(1 -> 64) -> GELU -> Linear(64 -> 64) -> LayerNorm
+Linear(1 → 64) → GELU → Linear(64 → 64) → LayerNorm
 ```
 
 Allows different transformations for different feature distributions.
@@ -97,8 +97,8 @@ CLS attends to all features and produces the final representation.
 Uses `norm_first=True` for more stable training without warmup:
 
 ```
-Pre-LN:  x = x + Attention(LayerNorm(x))   [Stable]
-Post-LN: x = LayerNorm(x + Attention(x))   [Requires warmup]
+Pre-LN:  x = x + Attention(LayerNorm(x))   ✓ Stable
+Post-LN: x = LayerNorm(x + Attention(x))   ✗ Requires warmup
 ```
 
 ---
@@ -106,76 +106,69 @@ Post-LN: x = LayerNorm(x + Attention(x))   [Requires warmup]
 ## Architecture Diagram
 
 ```
-                     +-------------------------------------+
-                     |     INPUT: T features + 2 meta     |
-                     |   (tokens, raw_values) per feature |
-                     +-------------------------------------+
-                                       |
-          +----------------------------+----------------------------+
-          |                            |                            |
-          v                            v                            v
-   +-------------+              +-------------+              +-------------+
-   | Feature 1   |              | Feature 2   |     ...      | Feature T   |
-   | token->embed|              | token->embed|              | token->embed|
-   | value->MLP  |              | value->MLP  |              | value->MLP  |
-   | gate fusion |              | gate fusion |              | gate fusion |
-   +-------------+              +-------------+              +-------------+
-          |                            |                            |
-          +----------------------------+----------------------------+
-                                       |
-                                       v
-                            +----------------------+
-                            |  Embedding Dropout   |
-                            |      (p=0.05)        |
-                            +----------------------+
-                                       |
-                                       v
-                            +----------------------+
-                            |   Prepend [CLS]      |
-                            |      Token           |
-                            +----------------------+
-                                       |
-                                       v
-                            +----------------------+
-                            |    TokenDrop         |
-                            |  (p=0.12, train)     |
-                            +----------------------+
-                                       |
-                                       v
-                     +-------------------------------------+
-                     |      TRANSFORMER ENCODER            |
-                     |  +-------------------------------+  |
-                     |  | Layer 1: 4-head attention     |  |
-                     |  | + FFN(64->256->64) + PreLN    |  |
-                     |  +-------------------------------+  |
-                     |  +-------------------------------+  |
-                     |  | Layer 2: 4-head attention     |  |
-                     |  | + FFN(64->256->64) + PreLN    |  |
-                     |  +-------------------------------+  |
-                     |  +-------------------------------+  |
-                     |  | Layer 3: 4-head attention     |  |
-                     |  | + FFN(64->256->64) + PreLN    |  |
-                     |  +-------------------------------+  |
-                     +-------------------------------------+
-                                       |
-                                       v
-                            +----------------------+
-                            |  Extract [CLS]       |
-                            |    Embedding         |
-                            +----------------------+
-                                       |
-                                       v
-                     +-------------------------------------+
-                     |         PREDICTION HEAD             |
-                     |  LayerNorm -> Linear(64->192)       |
-                     |  -> GELU -> Dropout -> Linear(192->1)|
-                     +-------------------------------------+
-                                       |
-                                       v
-                          +---------------------+
-                          | Predicted Residual  |
-                          |    (z-scored)       |
-                          +---------------------+
+                     ┌─────────────────────────────────────┐
+                     │     INPUT: T features + 2 meta     │
+                     │   (tokens, raw_values) per feature │
+                     └─────────────────────────────────────┘
+                                       │
+          ┌────────────────────────────┼────────────────────────────┐
+          ▼                            ▼                            ▼
+   ┌─────────────┐              ┌─────────────┐              ┌─────────────┐
+   │ Feature 1   │              │ Feature 2   │     ...      │ Feature T   │
+   │ token→embed │              │ token→embed │              │ token→embed │
+   │ value→MLP   │              │ value→MLP   │              │ value→MLP   │
+   │ gate fusion │              │ gate fusion │              │ gate fusion │
+   └─────────────┘              └─────────────┘              └─────────────┘
+          │                            │                            │
+          └────────────────────────────┼────────────────────────────┘
+                                       │
+                            ┌──────────▼──────────┐
+                            │  Embedding Dropout  │
+                            │      (p=0.05)       │
+                            └──────────┬──────────┘
+                                       │
+                            ┌──────────▼──────────┐
+                            │   Prepend [CLS]     │
+                            │      Token          │
+                            └──────────┬──────────┘
+                                       │
+                            ┌──────────▼──────────┐
+                            │    TokenDrop        │
+                            │  (p=0.12, train)    │
+                            └──────────┬──────────┘
+                                       │
+                     ┌─────────────────▼─────────────────┐
+                     │      TRANSFORMER ENCODER          │
+                     │  ┌─────────────────────────────┐  │
+                     │  │ Layer 1: 4-head attention   │  │
+                     │  │ + FFN(64→256→64) + PreLN    │  │
+                     │  └─────────────────────────────┘  │
+                     │  ┌─────────────────────────────┐  │
+                     │  │ Layer 2: 4-head attention   │  │
+                     │  │ + FFN(64→256→64) + PreLN    │  │
+                     │  └─────────────────────────────┘  │
+                     │  ┌─────────────────────────────┐  │
+                     │  │ Layer 3: 4-head attention   │  │
+                     │  │ + FFN(64→256→64) + PreLN    │  │
+                     │  └─────────────────────────────┘  │
+                     └─────────────────┬─────────────────┘
+                                       │
+                            ┌──────────▼──────────┐
+                            │  Extract [CLS]      │
+                            │    Embedding        │
+                            └──────────┬──────────┘
+                                       │
+                     ┌─────────────────▼─────────────────┐
+                     │         PREDICTION HEAD           │
+                     │  LayerNorm → Linear(64→192)       │
+                     │  → GELU → Dropout → Linear(192→1) │
+                     └─────────────────┬─────────────────┘
+                                       │
+                                       ▼
+                          ┌─────────────────────┐
+                          │ Predicted Residual  │
+                          │    (z-scored)       │
+                          └─────────────────────┘
 ```
 
 ---
@@ -225,8 +218,8 @@ final_prediction = base_pred + calibrated_residual
 
 ```bash
 # Clone the repository
-git clone https://github.com/LEDazzio01/Tab-Transformer-Plus-Plus.git
-cd Tab-Transformer-Plus-Plus
+git clone https://github.com/LEDazzio01/Tab-Transformer-Residual-Learning.git
+cd Tab-Transformer-Residual-Learning
 
 # Install dependencies
 pip install numpy pandas torch scikit-learn jupyter
@@ -271,7 +264,7 @@ All hyperparameters are centralized in the `Config` class:
 ## File Structure
 
 ```
-Tab-Transformer-Plus-Plus/
+Tab-Transformer-Residual-Learning/
 ├── README.md                              # This file
 ├── TabTransformer_Residual_Learning.ipynb # Complete implementation
 └── ...
