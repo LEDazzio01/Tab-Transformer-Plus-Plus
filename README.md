@@ -81,4 +81,65 @@ graph TD
         J --> K[Isotonic Calibration]
         K --> L[Add to Base Prediction]
     end
+# Code Structure
 
+## Config
+Central repository for hyperparameters, including:
+- Batch size
+- Learning rate
+- Number of bins
+- Hidden sizes
+- TokenDrop probability
+- Other training and model parameters
+
+## get_simulated_data()
+Simulates the stacking environment by:
+- Training **Ridge** and **RandomForest** models
+- Using **K-Fold Cross-Validation**
+- Generating leak-free **Out-Of-Fold (OOF) residuals**
+
+## TabularTokenizer
+Custom tokenizer that:
+- Applies **Quantile Binning** to create discrete tokens
+- Applies **Z-Score normalization** to create continuous scalars
+- Outputs **both representations** for each feature
+
+## TabTransformerGated (Main Model)
+PyTorch module implementing:
+- Dual representation inputs (tokens + scalars)
+- Gated Fusion layer
+- Per-token MLPs for scalar projections
+- `[CLS]` token handling
+- Transformer encoder stack with **Pre-LayerNorm**
+
+## TokenDrop
+Custom module for feature-level dropout:
+- Randomly zeroes entire feature embeddings
+- Controls over-reliance on any single column
+
+## Training Loop
+Implements:
+- Standard supervised training on residual targets
+- **EMA (Exponential Moving Average)** over model weights for stability
+- **Isotonic Regression** for final value calibration
+
+## Final Inference
+
+
+\[
+y_{\text{pred}} = y_{\text{base}} + y_{\text{residual}}
+\]
+
+
+
+---
+
+# 📊 Results & Performance
+
+The stacking approach yields a significant reduction in error compared to the base model alone.
+
+## California Housing Simulation (Example)
+
+| Model Strategy                 | Train RMSE (CV) | Test RMSE (Holdout) | Improvement |
+|--------------------------------|-----------------|---------------------|-------------|
+| Base Model Only (Ridge)        | 0.8094          | 0.7361             
