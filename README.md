@@ -20,11 +20,11 @@ This project implements **TabTransformer++**, an enhanced transformer architectu
 ### The Residual Learning Approach
 
 ```
-+-------------------+     +------------------------+     +-----------------------+
-|    Base Model     |     |    TabTransformer++    |     |   Final Prediction    |
-| (Ridge, XGBoost)  | --> |   Predicts Residual    | --> |   Base + Residual     |
-|    -> base_pred   |     |        (error)         |     |                       |
-+-------------------+     +------------------------+     +-----------------------+
++--------------------+     +------------------------+     +-----------------------+
+|    Base Model      |     |    TabTransformer++    |     |   Final Prediction    |
+| (HistGBR, XGBoost) | --> |   Predicts Residual    | --> |   Base + Residual     |
+|    -> base_pred    |     |        (error)         |     |                       |
++--------------------+     +------------------------+     +-----------------------+
 ```
 
 **Why residual learning?**
@@ -49,16 +49,20 @@ Each feature is represented in two complementary ways:
 
 *Why both?* Binning loses precision (1.01 and 1.99 may share a bin), but raw scalars lack pattern-matching power.
 
-### 2. Learnable Gated Fusion
+### 2. Learnable Gated Fusion (Safe Initialization)
 
-Per-feature gates (initialized to 0) control the blend:
+Per-feature gates control the blend between token and scalar representations:
 
 ```python
 final_emb[i] = token_emb[i] + sigmoid(gate[i]) * value_emb[i]
 ```
 
+**Safe Initialization**: Gates are initialized to **-2.0** (sigmoid ≈ 0.12), biasing the model to rely on stable token embeddings first. This prevents early divergence before the model learns when to trust scalar values.
+
 - Gates are **learned independently** for each feature
 - Model adapts to each column's characteristics automatically
+- Low gate → token-dominant (categorical treatment)
+- High gate → scalar-dominant (precise numeric treatment)
 
 ### 3. Per-Token Value MLPs
 
@@ -70,17 +74,17 @@ Linear(1 -> 64) -> GELU -> Linear(64 -> 64) -> LayerNorm
 
 Allows different transformations for different feature distributions.
 
-### 4. TokenDrop Regularization
+### 4. TokenDrop Regularization (with Inverted Scaling)
 
 During training, randomly zero out feature embeddings (p=0.12):
 
 ```python
 mask = (random > p)   # per-sample, per-feature
 mask[:, 0] = 1.0      # Never drop CLS token
-x = x * mask
+x = x * mask / (1 - p)  # Inverted scaling for magnitude consistency
 ```
 
-Prevents over-reliance on any single feature.
+Prevents over-reliance on any single feature. The inverted scaling maintains expected magnitude between train and test modes (like standard Dropout).
 
 ### 5. CLS Token Aggregation
 
@@ -174,9 +178,53 @@ Post-LN: x = LayerNorm(x + Attention(x))   [Requires warmup]
                                        v
                           +---------------------+
                           | Predicted Residual  |
-                          |    (z-scored)       |
+                          |  (robust-scaled)    |
                           +---------------------+
 ```
+
+---
+
+## Interpretability Features
+
+TabTransformer++ includes built-in interpretability tools:
+
+### Gate Value Visualization
+
+Extract and visualize learned gate values to understand feature treatment:
+
+```python
+gate_values = extract_gate_values(model, feature_names)
+visualize_gate_values(gate_values)
+```
+
+- **Low gate (near 0)**: Feature works better as categorical bins
+- **High gate (near 1)**: Feature requires precise scalar values
+
+### Token Embedding Visualization
+
+Visualize learned embeddings using t-SNE or PCA:
+
+```python
+visualize_token_embeddings(model, tokenizer, feature_idx=0, method='pca')
+```
+
+Shows how the model organizes quantile bins in embedding space, revealing learned semantic relationships.
+
+---
+
+## Why TabTransformer++ Over XGBoost?
+
+Even when RMSE is comparable, TabTransformer++ offers unique advantages:
+
+| Capability | XGBoost | TabTransformer++ |
+|------------|---------|------------------|
+| **Dense Embeddings** | ❌ No | ✅ Each row becomes a learned vector |
+| **Multi-Modal Fusion** | ❌ Cannot combine with images/text | ✅ Embeddings fuse with vision/NLP models |
+| **Transfer Learning** | ❌ Must retrain from scratch | ✅ Pre-train on large tables, fine-tune on small |
+| **Interpretable Gates** | ❌ Feature importance only | ✅ Learn token vs scalar preference per feature |
+| **GPU Batch Inference** | ⚠️ Limited | ✅ Native PyTorch batching |
+
+**The Real Value**: TabTransformer++ generates **dense embeddings** suitable for downstream multi-modal tasks (e.g., combining tabular property data with house images).
 
 ---
 
@@ -186,8 +234,8 @@ The notebook implements a complete 5-fold cross-validation pipeline:
 
 ### Step 1: Base Model Stacking
 ```python
-# Ridge regression for base predictions
-model_base = Ridge(alpha=1.0)
+# HistGradientBoostingRegressor for base predictions (captures non-linearity)
+model_base = HistGradientBoostingRegressor(max_iter=100, max_depth=5)
 
 # RandomForest for additional signal  
 model_dt = RandomForestRegressor(n_estimators=20, max_depth=8)
@@ -196,10 +244,17 @@ model_dt = RandomForestRegressor(n_estimators=20, max_depth=8)
 residual = target - base_pred
 ```
 
+**Why HistGradientBoostingRegressor instead of Ridge?**
+- Captures non-linear patterns that linear models miss
+- Leaves purer high-order feature interactions for the Transformer
+- Faster than RandomForest due to histogram-based splits
+
 ### Step 2: Tabular Tokenization
 - **Quantile binning**: 32 bins for features, 128 for base_pred, 64 for tree_pred
-- **Z-score normalization**: Preserves raw numeric information
+- **Robust scaling**: `(x - median) / IQR` — resistant to outliers (replaces Z-score)
 - Fit on training fold only (leak-free)
+
+**Why Robust Scaling?** Z-score `(x - mean) / std` is sensitive to outliers, which can cause gradient explosions in the scalar path. Robust scaling using median and IQR stabilizes training across all folds.
 
 ### Step 3: Train TabTransformer++
 - **EMA (Polyak averaging)**: Maintains exponential moving average of weights
