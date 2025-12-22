@@ -225,7 +225,7 @@ final_prediction = base_pred + calibrated_residual
 
 ```bash
 # Clone the repository
-git clone https://github.com/LEDazzio01/Tab-Transformer-Residual-Learning.git
+git clone https://github.com/LEDazzio01/Tab-Transformer-Plus-Plus.git
 cd Tab-Transformer-Residual-Learning
 
 # Install dependencies
