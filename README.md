@@ -271,7 +271,7 @@ All hyperparameters are centralized in the `Config` class:
 ## File Structure
 
 ```
-Tab-Transformer-Residual-Learning/
+Tab-Transformer-Plus-Plus/
 ├── README.md                              # This file
 ├── TabTransformer_Residual_Learning.ipynb # Complete implementation
 └── ...
