@@ -8,7 +8,7 @@ Based on: **TabTransformer: Tabular Data Modeling Using Contextual Embeddings** 
 
 ---
 
-## 🧠 Core concept: Residual stacking
+## 🧠 Core Concept: Residual Stacking
 
 The model treats the regression problem as an **additive decomposition**:
 
@@ -20,40 +20,42 @@ The model treats the regression problem as an **additive decomposition**:
 
 
 
-- **Base Model (Ridge):** A computationally cheap, interpretable model generates the initial prediction.  
-- **Target Calculation:**  
-  
+- **Base Model (Ridge):** A computationally cheap, interpretable model generates the initial prediction.
+- **Target Calculation:**
+
+
 
 \[
-  \text{Residual} = \text{True Target} - \text{Base Prediction}
-  \]
+\text{Residual} = \text{True Target} - \text{Base Prediction}
+\]
 
 
-- **Correction:** The TabTransformer++ learns to predict this specific error.  
+
+- **Correction:** The TabTransformer++ learns to predict this specific error.
 - **Inference:** The Transformer's output is added to the Ridge prediction to correct it.
 
-This design matches how human analysts often work: start with a simple baseline, then layer in structured corrections.
+This design mirrors how human analysts often work: start with a simple baseline, then layer in structured corrections.
 
 ---
 
-## 🚀 Architectural innovations
+## 🚀 Architectural Innovations
 
 Standard Transformers treat tabular data as simple discrete tokens (like words). **TabTransformer++** introduces six key innovations to handle **continuous numerical data** more effectively.
 
-### Innovation summary
+### Innovation Summary
 
-| # | Innovation        | Description |
-|---|-------------------|-------------|
+| # | Innovation | Description |
+|---|------------|-------------|
 | 1 | Dual Representation | Features are processed as both discrete tokens (via Quantile Binning) and continuous scalars (via Z-Score normalization) to capture both non-linear patterns and precise magnitudes. |
-| 2 | Gated Fusion      | A learnable Sigmoid Gate dynamically blends the discrete embedding with the continuous scalar projection: \(E = E_{\text{tok}} + \sigma(g) \cdot E_{\text{val}}\). |
-| 3 | Per-Token MLPs    | Each feature has its own dedicated MLP to project scalar values, allowing the model to learn specific transformations (e.g., logarithmic vs. linear) for each column. |
-| 4 | TokenDrop         | "Dropout at the feature level." Randomly zeros out entire feature embeddings during training (\(p = 0.12\)) to prevent over-reliance on any single column. |
-| 5 | CLS Token         | A special learned `[CLS]` token is prepended to the input sequence. The final prediction is derived solely from this token's embedding. |
-| 6 | Pre-LayerNorm     | Layer Normalization is applied *before* attention blocks (`norm_first=True`) for stable gradient flow. |
+| 2 | Gated Fusion | A learnable sigmoid gate dynamically blends the discrete embedding with the continuous scalar projection: \(E = E_{\text{tok}} + \sigma(g) \cdot E_{\text{val}}\). |
+| 3 | Per-Token MLPs | Each feature has its own dedicated MLP to project scalar values, allowing the model to learn specific transformations (e.g., logarithmic vs. linear) for each column. |
+| 4 | TokenDrop | Feature-level dropout that randomly zeros entire feature embeddings during training (\(p = 0.12\)) to prevent over-reliance on any single column. |
+| 5 | CLS Token | A special learned `[CLS]` token is prepended to the input sequence. The final prediction is derived solely from this token’s embedding. |
+| 6 | Pre-LayerNorm | Layer normalization is applied *before* attention blocks (`norm_first=True`) for stable gradient flow. |
 
 ---
 
-## 🛠️ Workflow diagram
+## 🛠️ Workflow Diagram
 
 The full pipeline is **leak-free**, modular, and stacking-aware.
 
@@ -63,25 +65,25 @@ graph TD
         A[Raw Data] -->|K-Fold| B[Train Base Model: Ridge]
         B --> C[Calculate Residuals]
     end
-    
+
     subgraph "2. Tokenization"
         C --> D{TabularTokenizer}
         D -->|Quantile Binning| E[Discrete Tokens]
         D -->|Z-Score Scaling| F[Continuous Scalars]
     end
-    
+
     subgraph "3. TabTransformer++"
         E & F --> G[Gated Fusion Layer]
         G --> H[TokenDrop]
         H --> I[Transformer Encoder × 3]
         I --> J[Predict Residual]
     end
-    
+
     subgraph "4. Post-Processing"
         J --> K[Isotonic Calibration]
         K --> L[Add to Base Prediction]
     end
-# Code Structure
+
 
 ## Config
 Central repository for hyperparameters, including:
