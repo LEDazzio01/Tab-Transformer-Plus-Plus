@@ -226,7 +226,7 @@ final_prediction = base_pred + calibrated_residual
 ```bash
 # Clone the repository
 git clone https://github.com/LEDazzio01/Tab-Transformer-Plus-Plus.git
-cd Tab-Transformer-Residual-Learning
+cd Tab-Transformer-Plus-Plus
 
 # Install dependencies
 pip install numpy pandas torch scikit-learn jupyter
