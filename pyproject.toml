@@ -7,7 +7,7 @@ name = "tab-transformer-plus-plus"
 version = "0.1.0"
 description = "A production-ready implementation of TabTransformer++ for tabular data."
 readme = "README.md"
-authors = [ { name = "Elaine", email = "" } ]
+authors = [ { name = "Elaine" } ]
 license = { text = "MIT" }
 requires-python = ">=3.8"
 dependencies = [

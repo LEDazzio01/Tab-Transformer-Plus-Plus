@@ -1,13 +1,17 @@
 """Training pipeline and CLI for TabTransformer++.
 
-This module implements a simple training pipeline for TabTransformer++ on
+This module implements a flexible training pipeline for TabTransformer++ on
 tabular datasets.  It includes a command‑line interface that can train
-the model on the California Housing dataset.
+the model on custom CSV data or the built-in California Housing dataset.
 
 Usage:
 
 ```bash
-python -m tab_transformer_plus_plus.train train cal_housing --epochs 10 --batch_size 1024
+# Train on California Housing (built-in demo)
+python -m tab_transformer_plus_plus.train train --dataset cal_housing --epochs 10 --batch_size 1024
+
+# Train on custom CSV data
+python -m tab_transformer_plus_plus.train train --train_data path/to/train.csv --target_col target_name --epochs 10
 ```
 
 The `ttpp` entrypoint exposed via `pyproject.toml` forwards to this
@@ -18,12 +22,12 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Iterable, List, Tuple
+from pathlib import Path
+from typing import Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import torch
-from sklearn.datasets import fetch_california_housing
 from sklearn.model_selection import KFold, train_test_split
 from sklearn.ensemble import RandomForestRegressor, HistGradientBoostingRegressor
 from sklearn.isotonic import IsotonicRegression
@@ -32,6 +36,94 @@ from sklearn.metrics import mean_squared_error
 from .model import TabTransformerGated, TTConfig
 from .tokenizer import TabularTokenizer
 from .utils import seed_everything, root_rmse
+
+
+def load_data(
+    train_path: Optional[str] = None,
+    target_col: Optional[str] = None,
+    test_path: Optional[str] = None,
+    test_size: float = 0.2,
+    seed: int = 2025,
+) -> Tuple[pd.DataFrame, pd.DataFrame, str, List[str]]:
+    """Load training data from CSV or use built-in California Housing dataset.
+
+    Parameters
+    ----------
+    train_path : str, optional
+        Path to training CSV file. If None, uses California Housing dataset.
+    target_col : str, optional
+        Name of the target column. Required if train_path is provided.
+    test_path : str, optional
+        Path to test CSV file. If None, splits train_path data.
+    test_size : float
+        Fraction of data to use for testing if test_path is None.
+    seed : int
+        Random seed for train/test split.
+
+    Returns
+    -------
+    train_df : pd.DataFrame
+        Training dataframe.
+    test_df : pd.DataFrame
+        Test dataframe.
+    target_col : str
+        Name of the target column.
+    features : List[str]
+        List of feature column names.
+    """
+    if train_path is not None:
+        if target_col is None:
+            raise ValueError("--target_col is required when using --train_data")
+
+        train_df = pd.read_csv(train_path)
+
+        if target_col not in train_df.columns:
+            raise ValueError(f"Target column '{target_col}' not found in training data. "
+                           f"Available columns: {list(train_df.columns)}")
+
+        features = [c for c in train_df.columns if c != target_col]
+
+        if test_path is not None:
+            test_df = pd.read_csv(test_path)
+            if target_col not in test_df.columns:
+                raise ValueError(f"Target column '{target_col}' not found in test data.")
+        else:
+            train_df, test_df = train_test_split(
+                train_df, test_size=test_size, random_state=seed
+            )
+            train_df = train_df.reset_index(drop=True)
+            test_df = test_df.reset_index(drop=True)
+
+        print(f"Loaded custom dataset:")
+        print(f"  Train samples: {len(train_df)}")
+        print(f"  Test samples: {len(test_df)}")
+        print(f"  Features: {len(features)}")
+        print(f"  Target: {target_col}")
+
+    else:
+        # Use built-in California Housing dataset
+        try:
+            from sklearn.datasets import fetch_california_housing
+        except ImportError:
+            raise ImportError(
+                "scikit-learn is required for the California Housing dataset. "
+                "Install with: pip install scikit-learn"
+            )
+
+        data = fetch_california_housing(as_frame=True)
+        df = data.frame.copy()
+        train_df, test_df = train_test_split(df, test_size=test_size, random_state=seed)
+        train_df = train_df.reset_index(drop=True)
+        test_df = test_df.reset_index(drop=True)
+        target_col = "MedHouseVal"
+        features = [c for c in df.columns if c != target_col]
+
+        print(f"Loaded California Housing dataset:")
+        print(f"  Train samples: {len(train_df)}")
+        print(f"  Test samples: {len(test_df)}")
+        print(f"  Features: {len(features)}")
+
+    return train_df, test_df, target_col, features
 
 
 def _train_tab_transformer(
@@ -140,23 +232,47 @@ def _fit_base_models(X: np.ndarray, y: np.ndarray, cv: KFold) -> Tuple[np.ndarra
     return oof_base, oof_dt
 
 
-def train_cal_housing(epochs: int = 10, batch_size: int = 1024, seed: int = 2025) -> None:
-    """Train TabTransformer++ on the California Housing dataset.
+def train_tabular(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    target_col: str,
+    features: List[str],
+    epochs: int = 10,
+    batch_size: int = 1024,
+    seed: int = 2025,
+    n_folds: int = 5,
+    config: TTConfig | None = None,
+) -> None:
+    """Train TabTransformer++ on a tabular dataset.
 
-    This function performs a 5‑fold cross‑validation training loop that
-    combines base models with TabTransformer++.  It prints RMSE for the
-    base model alone and for the residual model.
+    This function performs cross-validated training that combines base models
+    with TabTransformer++. It prints RMSE for the base model alone and for
+    the residual model.
+
+    Parameters
+    ----------
+    train_df : pd.DataFrame
+        Training dataframe containing features and target.
+    test_df : pd.DataFrame
+        Test dataframe for holdout evaluation.
+    target_col : str
+        Name of the target column.
+    features : List[str]
+        List of feature column names.
+    epochs : int
+        Number of training epochs.
+    batch_size : int
+        Batch size for training.
+    seed : int
+        Random seed for reproducibility.
+    n_folds : int
+        Number of cross-validation folds.
+    config : TTConfig, optional
+        Model configuration.
     """
     seed_everything(seed)
-    # Load data
-    data = fetch_california_housing(as_frame=True)
-    df = data.frame.copy()
-    # Split into train/test to evaluate holdout performance
-    train_df, test_df = train_test_split(df, test_size=0.2, random_state=seed)
-    target_col = "MedHouseVal"
-    features = [c for c in df.columns if c != target_col]
     # Prepare cross-validation for base models
-    cv = KFold(n_splits=5, shuffle=True, random_state=seed)
+    cv = KFold(n_splits=n_folds, shuffle=True, random_state=seed)
     X_train = train_df[features].values
     y_train = train_df[target_col].values
     # Fit base models and get OOF predictions
@@ -248,31 +364,136 @@ def train_cal_housing(epochs: int = 10, batch_size: int = 1024, seed: int = 2025
     print(f"  Base + TabTransformer++ (test):    {model_rmse_test:.5f}")
 
 
+def train_cal_housing(epochs: int = 10, batch_size: int = 1024, seed: int = 2025) -> None:
+    """Train TabTransformer++ on the California Housing dataset (legacy wrapper).
+
+    This function is a convenience wrapper that loads the California Housing
+    dataset and calls train_tabular.
+    """
+    train_df, test_df, target_col, features = load_data(seed=seed)
+    train_tabular(
+        train_df=train_df,
+        test_df=test_df,
+        target_col=target_col,
+        features=features,
+        epochs=epochs,
+        batch_size=batch_size,
+        seed=seed,
+    )
+
+
 def main(argv: List[str] | None = None) -> None:
     """Entry point for the TabTransformer++ CLI.
 
-    Currently supports only the `train` command on the California Housing
-    dataset.  Additional subcommands and datasets can be added in the
-    future.
+    Supports training on custom CSV data or the built-in California Housing
+    dataset.
+
+    Examples
+    --------
+    # Train on California Housing (demo)
+    ttpp train --dataset cal_housing --epochs 10
+
+    # Train on custom CSV data
+    ttpp train --train_data data/train.csv --target_col price --epochs 20
+
+    # Train with separate test file
+    ttpp train --train_data train.csv --test_data test.csv --target_col target
     """
-    parser = argparse.ArgumentParser(description="TabTransformer++ CLI")
-    subparsers = parser.add_subparsers(dest="command")
-    # Train subcommand
-    train_parser = subparsers.add_parser("train", help="Train TabTransformer++ on a dataset")
-    train_parser.add_argument(
-        "dataset",
-        choices=["cal_housing"],
-        help="Dataset to train on (currently only California Housing)",
+    parser = argparse.ArgumentParser(
+        description="TabTransformer++ CLI - Train transformer models on tabular data"
     )
-    train_parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs")
-    train_parser.add_argument("--batch_size", type=int, default=1024, help="Batch size for training")
-    train_parser.add_argument("--seed", type=int, default=2025, help="Random seed")
+    subparsers = parser.add_subparsers(dest="command")
+
+    # Train subcommand
+    train_parser = subparsers.add_parser(
+        "train",
+        help="Train TabTransformer++ on a dataset",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="""Train TabTransformer++ on tabular data.
+
+Examples:
+  # Train on built-in California Housing dataset
+  ttpp train --dataset cal_housing --epochs 10 --batch_size 1024
+
+  # Train on custom CSV data
+  ttpp train --train_data path/to/train.csv --target_col my_target --epochs 20
+
+  # Train with explicit test set
+  ttpp train --train_data train.csv --test_data test.csv --target_col target
+"""
+    )
+
+    # Data source arguments (mutually exclusive group)
+    data_group = train_parser.add_mutually_exclusive_group()
+    data_group.add_argument(
+        "--dataset",
+        choices=["cal_housing"],
+        help="Built-in dataset to use (default: cal_housing if no --train_data)",
+    )
+    data_group.add_argument(
+        "--train_data",
+        type=str,
+        metavar="PATH",
+        help="Path to training CSV file",
+    )
+
+    # Custom data arguments
+    train_parser.add_argument(
+        "--test_data",
+        type=str,
+        metavar="PATH",
+        help="Path to test CSV file (optional, splits train_data if not provided)",
+    )
+    train_parser.add_argument(
+        "--target_col",
+        type=str,
+        metavar="NAME",
+        help="Name of the target column (required with --train_data)",
+    )
+    train_parser.add_argument(
+        "--test_size",
+        type=float,
+        default=0.2,
+        help="Fraction of data for testing if --test_data not provided (default: 0.2)",
+    )
+
+    # Training hyperparameters
+    train_parser.add_argument(
+        "--epochs", type=int, default=10, help="Number of training epochs (default: 10)"
+    )
+    train_parser.add_argument(
+        "--batch_size", type=int, default=1024, help="Batch size for training (default: 1024)"
+    )
+    train_parser.add_argument(
+        "--n_folds", type=int, default=5, help="Number of cross-validation folds (default: 5)"
+    )
+    train_parser.add_argument(
+        "--seed", type=int, default=2025, help="Random seed (default: 2025)"
+    )
+
     args = parser.parse_args(argv)
+
     if args.command == "train":
-        if args.dataset == "cal_housing":
-            train_cal_housing(epochs=args.epochs, batch_size=args.batch_size, seed=args.seed)
-        else:
-            raise ValueError(f"Unsupported dataset: {args.dataset}")
+        # Load data from CSV or built-in dataset
+        train_df, test_df, target_col, features = load_data(
+            train_path=args.train_data,
+            target_col=args.target_col,
+            test_path=args.test_data,
+            test_size=args.test_size,
+            seed=args.seed,
+        )
+
+        # Train the model
+        train_tabular(
+            train_df=train_df,
+            test_df=test_df,
+            target_col=target_col,
+            features=features,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            seed=args.seed,
+            n_folds=args.n_folds,
+        )
     else:
         parser.print_help()
 

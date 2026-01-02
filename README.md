@@ -11,6 +11,13 @@
   <strong>A novel extension of TabTransformer with gated fusion for residual-based model stacking</strong>
 </p>
 
+<p align="center">
+  <a href="#quick-start">Quick Start</a> •
+  <a href="#novel-architectural-contributions">Architecture</a> •
+  <a href="#system-design-production-deployment">Production</a> •
+  <a href="CHANGELOG.md">Changelog</a>
+</p>
+
 ---
 
 ## Overview
@@ -276,6 +283,164 @@ final_prediction = base_pred + calibrated_residual
 
 ---
 
+## System Design: Production Deployment
+
+This section outlines how TabTransformer++ fits into a production ML system.
+
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           TRAINING PIPELINE                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   ┌──────────────┐    ┌───────────────────┐    ┌─────────────────────────┐  │
+│   │  Raw Data    │───▶│  TabularTokenizer │───▶│  Feature Store          │  │
+│   │  (Offline)   │    │  .fit() on TRAIN  │    │  (Serialize tokenizer)  │  │
+│   └──────────────┘    └───────────────────┘    └─────────────────────────┘  │
+│                              │                                               │
+│                              ▼                                               │
+│                     ┌─────────────────────┐                                  │
+│                     │  TabTransformer++   │                                  │
+│                     │  PyTorch Training   │                                  │
+│                     └─────────────────────┘                                  │
+│                              │                                               │
+│                              ▼                                               │
+│   ┌─────────────────────────────────────────────────────────────────────┐   │
+│   │                     Model Export                                     │   │
+│   ├─────────────────────────────────────────────────────────────────────┤   │
+│   │  • torch.jit.script() → TorchScript (.pt)                           │   │
+│   │  • torch.onnx.export() → ONNX (.onnx)                               │   │
+│   │  • TensorRT optimization for NVIDIA GPUs                            │   │
+│   └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          INFERENCE PIPELINE                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   ┌──────────────┐    ┌───────────────────┐    ┌─────────────────────────┐  │
+│   │  New Request │───▶│  Feature Store    │───▶│  Tokenizer.transform()  │  │
+│   │  (Online)    │    │  (Load tokenizer) │    │  (Consistent binning)   │  │
+│   └──────────────┘    └───────────────────┘    └─────────────────────────┘  │
+│                                                          │                   │
+│                                                          ▼                   │
+│                              ┌────────────────────────────────────────────┐  │
+│                              │  Inference Runtime                         │  │
+│                              ├────────────────────────────────────────────┤  │
+│                              │  • ONNX Runtime (CPU/GPU)                  │  │
+│                              │  • TensorRT (NVIDIA, <1ms latency)         │  │
+│                              │  • TorchServe / Triton Inference Server    │  │
+│                              └────────────────────────────────────────────┘  │
+│                                                          │                   │
+│                                                          ▼                   │
+│                              ┌─────────────────────────────────────────┐     │
+│                              │  Prediction + Post-Processing           │     │
+│                              │  base_pred + calibrated_residual        │     │
+│                              └─────────────────────────────────────────┘     │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Production Considerations
+
+#### 1. Tokenizer Serialization to Feature Store
+
+The `TabularTokenizer` encapsulates learned quantile bins and scaling statistics. For online/offline consistency:
+
+```python
+import pickle
+
+# After training
+with open("tokenizer.pkl", "wb") as f:
+    pickle.dump(tokenizer, f)
+
+# Upload to Feature Store (e.g., Feast, Tecton, SageMaker Feature Store)
+feature_store.register_artifact("tabtransformer_tokenizer", "tokenizer.pkl")
+```
+
+**Why Feature Store?**
+- Ensures identical preprocessing in training and serving
+- Version control for tokenizer artifacts
+- Supports A/B testing different tokenizer configurations
+
+#### 2. Model Export for Low-Latency Inference
+
+```python
+# Export to ONNX (cross-platform, optimized inference)
+import torch.onnx
+
+model.eval()
+dummy_tok = torch.randint(0, 32, (1, num_features))
+dummy_val = torch.randn(1, num_features)
+
+torch.onnx.export(
+    model,
+    (dummy_tok, dummy_val),
+    "tabtransformer.onnx",
+    input_names=["tokens", "values"],
+    output_names=["prediction"],
+    dynamic_axes={"tokens": {0: "batch"}, "values": {0: "batch"}},
+)
+
+# For NVIDIA GPUs: Convert to TensorRT
+# trtexec --onnx=tabtransformer.onnx --saveEngine=tabtransformer.trt --fp16
+```
+
+**Inference Latency Targets:**
+| Runtime | Hardware | Typical Latency |
+|---------|----------|-----------------|
+| PyTorch | CPU | 5-20ms |
+| ONNX Runtime | CPU | 2-8ms |
+| ONNX Runtime | GPU | 0.5-2ms |
+| TensorRT | NVIDIA GPU | <1ms |
+
+#### 3. Online vs. Offline Feature Consistency
+
+**Problem**: Training uses batch statistics; serving sees single rows.
+
+**Solution**: Store computed features, don't recompute at inference.
+
+| Feature Type | Training | Serving |
+|--------------|----------|---------|
+| Raw features | Compute from source | Fetch from Feature Store |
+| Base model predictions | OOF predictions | Pre-computed daily batch |
+| Tokenized features | Batch transform | Single-row transform |
+
+**Preventing Train-Serve Skew:**
+1. **Tokenizer versioning**: Hash tokenizer params, embed in model metadata
+2. **Feature validation**: Assert feature distributions at inference time
+3. **Shadow mode**: Run new model in parallel, compare outputs before deployment
+
+#### 4. Deployment Architecture Options
+
+**Option A: Batch Prediction (Offline)**
+```
+Airflow/Prefect → Load Data → Transform → Predict → Write to DB
+```
+- Use for: Daily scoring of large datasets
+- Latency: Hours (acceptable)
+- Cost: Low (spot instances)
+
+**Option B: Real-Time API (Online)**
+```
+API Gateway → Load Balancer → Inference Pod (ONNX/TensorRT) → Response
+```
+- Use for: User-facing predictions
+- Latency: <50ms p99
+- Scaling: Horizontal pod autoscaling
+
+**Option C: Streaming (Near Real-Time)**
+```
+Kafka → Feature Compute → Model Inference → Kafka → Downstream
+```
+- Use for: Event-driven predictions
+- Latency: Seconds
+- Throughput: High (parallelizable)
+
+---
+
 ## Installation
 
 ```bash
@@ -291,12 +456,53 @@ pip install numpy pandas torch scikit-learn jupyter
 
 ## Quick Start
 
+### Option 1: Command-Line Interface
+
 ```bash
-# Launch the notebook
+# Install the package
+pip install -e .
+
+# Train on built-in California Housing dataset
+ttpp train --dataset cal_housing --epochs 10 --batch_size 1024
+
+# Train on your own CSV data
+ttpp train --train_data data/train.csv --target_col price --epochs 20
+
+# Train with explicit train/test split
+ttpp train --train_data train.csv --test_data test.csv --target_col target --n_folds 5
+```
+
+### Option 2: Jupyter Notebook
+
+```bash
 jupyter notebook TabTransformer_Residual_Learning.ipynb
 ```
 
-The notebook is self-contained and demonstrates the full pipeline using the **California Housing** dataset.
+The notebook demonstrates the full pipeline using the **California Housing** dataset.
+
+### Option 3: Python API
+
+```python
+import pandas as pd
+from tab_transformer_plus_plus.model import TabTransformerGated, TTConfig
+from tab_transformer_plus_plus.tokenizer import TabularTokenizer
+
+# Load your data
+df = pd.read_csv("data.csv")
+train_df, test_df = train_test_split(df, test_size=0.2)
+
+# Fit tokenizer on TRAINING data only (prevents leakage)
+tokenizer = TabularTokenizer(n_bins=32, features=feature_cols, target="target")
+tokenizer.fit(train_df)  # Never fit on full dataset!
+
+# Transform data
+X_train_tok, X_train_val = tokenizer.transform(train_df)
+X_test_tok, X_test_val = tokenizer.transform(test_df)
+
+# Create and train model
+model = TabTransformerGated(vocab_sizes=tokenizer.get_vocab_sizes())
+# ... training loop
+```
 
 ---
 
@@ -326,10 +532,22 @@ All hyperparameters are centralized in the `Config` class:
 ## File Structure
 
 ```
-Tab-Transformer-Residual-Learning/
-├── README.md                              # This file
-├── TabTransformer_Residual_Learning.ipynb # Complete implementation
-└── ...
+Tab-Transformer-Plus-Plus/
+├── README.md                              # This documentation
+├── CHANGELOG.md                           # Version history and changes
+├── LICENSE                                # MIT License
+├── pyproject.toml                         # Package configuration
+├── requirements.txt                       # Dependencies
+├── TabTransformer_Residual_Learning.ipynb # Interactive notebook demo
+├── src/
+│   └── tab_transformer_plus_plus/
+│       ├── __init__.py                    # Package exports
+│       ├── model.py                       # TabTransformerGated model (vectorized)
+│       ├── tokenizer.py                   # TabularTokenizer (optimized)
+│       ├── train.py                       # Training pipeline & CLI
+│       └── utils.py                       # Utility functions
+└── tests/
+    └── test_model.py                      # Unit & sanity tests
 ```
 
 ---
