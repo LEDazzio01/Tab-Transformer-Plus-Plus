@@ -1,0 +1,8 @@
+numpy
+pandas
+torch>=1.11
+scikit-learn
+matplotlib
+tqdm
+pytest
+flake8
